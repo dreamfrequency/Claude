@@ -1,0 +1,201 @@
+@page "/pong"
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+<PageTitle>Pong</PageTitle>
+
+<div class="game-wrapper">
+    <div class="game-header">
+        <div class="game-title">PONG</div>
+        <div class="score-board">
+            <span class="score-label">SCORE</span>
+            <span class="score-value">@score</span>
+        </div>
+        <div class="score-board">
+            <span class="score-label">BEST</span>
+            <span class="score-value">@highScore</span>
+        </div>
+    </div>
+
+    <div class="game-area">
+        @if (state == GameState.Playing || state == GameState.GameOver)
+        {
+            <div class="ball" style="left:@BallLeft;top:@BallTop"></div>
+            <div class="paddle" style="left:@PaddleLeft"></div>
+        }
+
+        @if (state == GameState.Ready)
+        {
+            <div class="overlay">
+                <div class="overlay-content">
+                    <h2 class="logo">PONG</h2>
+                    <p class="instructions">
+                        Use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> or
+                        <kbd>A</kbd> <kbd>D</kbd> to move the paddle
+                    </p>
+                    <button class="btn btn-lg start-btn" @onclick="StartGame">START GAME</button>
+                </div>
+            </div>
+        }
+        else if (state == GameState.GameOver)
+        {
+            <div class="overlay">
+                <div class="overlay-content">
+                    <h2 class="game-over-title">GAME OVER</h2>
+                    <div class="final-score">@score</div>
+                    @if (isNewHighScore)
+                    {
+                        <div class="new-best">NEW BEST!</div>
+                    }
+                    <button class="btn btn-lg start-btn" @onclick="StartGame">PLAY AGAIN</button>
+                </div>
+            </div>
+        }
+    </div>
+
+    @if (state == GameState.Playing)
+    {
+        <div class="game-footer">
+            <span class="speed-label">Speed: @SpeedDisplay</span>
+        </div>
+    }
+</div>
+
+@code {
+    // --- Constants ---
+    const int GameWidth = 800;
+    const int GameHeight = 500;
+    const int PaddleWidth = 120;
+    const int PaddleHeight = 14;
+    const int PaddleOffsetBottom = 20;
+    const int BallSize = 16;
+    const double BallRadius = BallSize / 2.0;
+    const double PaddleSpeed = 8;
+    const double InitialSpeed = 5;
+    const double SpeedIncrement = 0.15;
+    const double MaxSpeed = 12;
+
+    // --- State ---
+    enum GameState { Ready, Playing, GameOver }
+
+    GameState state = GameState.Ready;
+    double ballX, ballY, ballVx, ballVy;
+    double paddleX;
+    double currentSpeed;
+    int score, highScore;
+    bool isNewHighScore;
+    DotNetObjectReference<PongGame>? objRef;
+
+    // --- Computed ---
+    double PaddleTopY => GameHeight - PaddleOffsetBottom - PaddleHeight;
+    string BallLeft => $"{(int)(ballX - BallRadius)}px";
+    string BallTop => $"{(int)(ballY - BallRadius)}px";
+    string PaddleLeft => $"{(int)(paddleX - PaddleWidth / 2.0)}px";
+    int SpeedDisplay => (int)(currentSpeed * 10);
+
+    // --- Lifecycle ---
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            objRef = DotNetObjectReference.Create(this);
+            await JS.InvokeVoidAsync("pongInterop.init", objRef);
+        }
+    }
+
+    // --- Game actions ---
+    async Task StartGame()
+    {
+        score = 0;
+        isNewHighScore = false;
+        currentSpeed = InitialSpeed;
+        paddleX = GameWidth / 2.0;
+        ballX = GameWidth / 2.0;
+        ballY = GameHeight / 3.0;
+
+        var rng = new Random();
+        double angle = (rng.NextDouble() - 0.5) * 1.4; // roughly -40 to +40 deg from vertical
+        ballVx = Math.Sin(angle) * currentSpeed;
+        ballVy = Math.Cos(angle) * currentSpeed; // positive = downward
+
+        state = GameState.Playing;
+        StateHasChanged();
+        await JS.InvokeVoidAsync("pongInterop.start");
+    }
+
+    [JSInvokable]
+    public void Tick(bool left, bool right)
+    {
+        if (state != GameState.Playing) return;
+
+        // Move paddle
+        if (left) paddleX -= PaddleSpeed;
+        if (right) paddleX += PaddleSpeed;
+        paddleX = Math.Clamp(paddleX, PaddleWidth / 2.0, GameWidth - PaddleWidth / 2.0);
+
+        // Move ball
+        double prevBallBottom = ballY + BallRadius;
+        ballX += ballVx;
+        ballY += ballVy;
+        double ballBottom = ballY + BallRadius;
+
+        // Bounce off side walls
+        if (ballX - BallRadius <= 0)
+        {
+            ballX = BallRadius;
+            ballVx = Math.Abs(ballVx);
+        }
+        else if (ballX + BallRadius >= GameWidth)
+        {
+            ballX = GameWidth - BallRadius;
+            ballVx = -Math.Abs(ballVx);
+        }
+
+        // Bounce off top wall
+        if (ballY - BallRadius <= 0)
+        {
+            ballY = BallRadius;
+            ballVy = Math.Abs(ballVy);
+        }
+
+        // Paddle collision (swept check to prevent tunneling)
+        if (ballVy > 0 && prevBallBottom <= PaddleTopY && ballBottom >= PaddleTopY)
+        {
+            double padLeft = paddleX - PaddleWidth / 2.0 - BallRadius * 0.3;
+            double padRight = paddleX + PaddleWidth / 2.0 + BallRadius * 0.3;
+
+            if (ballX >= padLeft && ballX <= padRight)
+            {
+                score++;
+                currentSpeed = Math.Min(currentSpeed + SpeedIncrement, MaxSpeed);
+
+                double hitPos = Math.Clamp((ballX - paddleX) / (PaddleWidth / 2.0), -1, 1);
+                double bounceAngle = hitPos * 70.0 * Math.PI / 180.0;
+                ballVx = Math.Sin(bounceAngle) * currentSpeed;
+                ballVy = -Math.Cos(bounceAngle) * currentSpeed;
+                ballY = PaddleTopY - BallRadius;
+            }
+        }
+
+        // Ball missed paddle - game over
+        if (ballY + BallRadius >= GameHeight)
+        {
+            state = GameState.GameOver;
+            if (score > highScore)
+            {
+                highScore = score;
+                isNewHighScore = true;
+            }
+            _ = JS.InvokeVoidAsync("pongInterop.stop");
+        }
+
+        StateHasChanged();
+    }
+
+    // --- Cleanup ---
+    public async ValueTask DisposeAsync()
+    {
+        try { await JS.InvokeVoidAsync("pongInterop.dispose"); } catch { }
+        objRef?.Dispose();
+    }
+}
